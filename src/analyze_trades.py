@@ -28,9 +28,9 @@ def generate_analysis(trades_csv: str = None, output_dir: str = None, strategy_n
     """
     # Set default paths based on strategy name
     if trades_csv is None:
-        trades_csv = f"../data/processed/{strategy_name}/trades.csv"
+        trades_csv = f"data/processed/{strategy_name}/trades.csv"
     if output_dir is None:
-        output_dir = f"../results/{strategy_name}/analysis/"
+        output_dir = f"results/{strategy_name}/analysis/"
     # Create output directories
     output_path = Path(output_dir)
     figures_path = output_path / "figures"
@@ -82,37 +82,175 @@ def preprocess_trades(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_conditional_probability_metrics(df: pd.DataFrame) -> Dict:
+    """Compute conditional probability metrics based on signal conditions."""
+    if df.empty:
+        return {}
+
+    # Compute condition values for each trade
+    df['body_ratio'] = (abs(df['close'] - df['open']) / (df['high'] - df['low'])).fillna(0)
+    
+    # Compute close location based on direction
+    df['close_location'] = 0.0
+    long_mask = df['direction'] == 'long'
+    short_mask = df['direction'] == 'short'
+    
+    df.loc[long_mask, 'close_location'] = (df.loc[long_mask, 'close'] - df.loc[long_mask, 'low']) / (df.loc[long_mask, 'high'] - df.loc[long_mask, 'low'])
+    df.loc[short_mask, 'close_location'] = (df.loc[short_mask, 'high'] - df.loc[short_mask, 'close']) / (df.loc[short_mask, 'high'] - df.loc[short_mask, 'low'])
+    df['close_location'] = df['close_location'].fillna(0)
+    
+    # Compute breakout percentage
+    df['breakout_pct'] = 0.0
+    df.loc[long_mask, 'breakout_pct'] = ((df.loc[long_mask, 'close'] - df.loc[long_mask, 'orb_high']) / df.loc[long_mask, 'orb_high'] * 100).abs()
+    df.loc[short_mask, 'breakout_pct'] = ((df.loc[short_mask, 'orb_low'] - df.loc[short_mask, 'close']) / df.loc[short_mask, 'orb_low'] * 100).abs()
+    df['breakout_pct'] = df['breakout_pct'].fillna(0)
+    
+    # Thresholds from current config
+    body_threshold = 0.7
+    close_location_threshold = 0.85
+    breakout_threshold = 0.5
+    
+    def compute_group_metrics(group_df: pd.DataFrame) -> Dict:
+        """Compute metrics for a group of trades."""
+        if group_df.empty:
+            return {'trades': 0, 'win_rate': 0, 'avg_r': 0}
+        
+        wins = (group_df['pnl'] > 0).sum()
+        total = len(group_df)
+        win_rate = wins / total if total > 0 else 0
+        avg_r = group_df['profit_r'].mean() if 'profit_r' in group_df.columns else 0
+        
+        return {
+            'trades': total,
+            'win_rate': win_rate,
+            'avg_r': avg_r
+        }
+    
+    # Body ratio analysis
+    body_high = df[df['body_ratio'] >= body_threshold]
+    body_low = df[df['body_ratio'] < body_threshold]
+    
+    # Close location analysis
+    close_high = df[df['close_location'] >= close_location_threshold]
+    close_low = df[df['close_location'] < close_location_threshold]
+    
+    # Breakout analysis
+    breakout_high = df[df['breakout_pct'] >= breakout_threshold]
+    breakout_low = df[df['breakout_pct'] < breakout_threshold]
+    
+    metrics = {
+        'body_ratio': {
+            'high': compute_group_metrics(body_high),
+            'low': compute_group_metrics(body_low),
+            'threshold': body_threshold
+        },
+        'close_location': {
+            'high': compute_group_metrics(close_high),
+            'low': compute_group_metrics(close_low),
+            'threshold': close_location_threshold
+        },
+        'breakout_pct': {
+            'high': compute_group_metrics(breakout_high),
+            'low': compute_group_metrics(breakout_low),
+            'threshold': breakout_threshold
+        }
+    }
+    
+    return metrics
+
+
+def compute_signal_reason_metrics(df: pd.DataFrame) -> Dict:
+    """Compute signal reason statistics for strategies like StrictBreakout."""
+    # Check if signal_reason column exists
+    if 'signal_reason' not in df.columns:
+        return {'has_signal_reason': False}
+
+    # Filter out trades without signal reason
+    df_with_reason = df[df['signal_reason'].notna()]
+
+    if len(df_with_reason) == 0:
+        return {'has_signal_reason': True, 'trades_with_reason': 0}
+
+    # Parse reasons to extract components
+    reason_components = {
+        'body_ratio': [],
+        'close_location': [],
+        'breakout': []
+    }
+
+    # Determine which conditions are being used based on the signal reasons
+    conditions_used = set()
+
+    for reason in df_with_reason['signal_reason']:
+        if reason and ';' in str(reason):
+            parts = str(reason).split(';')
+            for part in parts:
+                if 'Body ratio' in part:
+                    reason_components['body_ratio'].append(part.strip())
+                    conditions_used.add('body_ratio')
+                elif 'Close location' in part:
+                    reason_components['close_location'].append(part.strip())
+                    conditions_used.add('close_location')
+                elif 'Breakout' in part and 'disabled' not in part:
+                    reason_components['breakout'].append(part.strip())
+                    conditions_used.add('breakout')
+        elif reason and 'disabled' in str(reason):
+            # Breakout condition is disabled
+            conditions_used.add('breakout_disabled')
+
+    # Count occurrences
+    metrics = {
+        'has_signal_reason': True,
+        'trades_with_reason': len(df_with_reason),
+        'trades_with_body_ratio': len(reason_components['body_ratio']),
+        'trades_with_close_location': len(reason_components['close_location']),
+        'trades_with_breakout': len(reason_components['breakout']),
+        'body_ratio_reasons': reason_components['body_ratio'][:10],  # First 10 for display
+        'close_location_reasons': reason_components['close_location'][:10],
+        'breakout_reasons': reason_components['breakout'][:10],
+        'strategy_conditions': sorted(list(conditions_used))
+    }
+
+    return metrics
+
+
 def compute_all_metrics(df: pd.DataFrame) -> Dict:
     """Compute all analysis metrics."""
     metrics = {}
-    
+
     # Overall metrics
     metrics['overall'] = compute_overall_metrics(df)
-    
+
     # Long vs short
     metrics['long_short'] = compute_long_short_metrics(df)
-    
+
     # Exit reason summary
     metrics['exit_reason'] = compute_exit_reason_metrics(df)
-    
+
     # OR width buckets
     metrics['or_width'] = compute_or_width_metrics(df)
-    
+
     # Entry time windows
     metrics['entry_time'] = compute_entry_time_metrics(df)
-    
+
     # Holding time analysis
     metrics['holding_time'] = compute_holding_time_metrics(df)
-    
+
     # Losing trades profit levels
     metrics['losing_profit_levels'] = compute_losing_trades_profit_levels(df)
-    
+
     # Profit capture analysis
     metrics['profit_capture'] = compute_profit_capture(df)
-    
+
+    # Signal reason analysis (for strategies like StrictBreakout)
+    metrics['signal_reason'] = compute_signal_reason_metrics(df)
+
+    # Conditional probability analysis
+    metrics['conditional_prob'] = compute_conditional_probability_metrics(df)
+
     # AI-friendly summary stats
     metrics['summary'] = compute_ai_summary(df, metrics)
-    
+
     return metrics
 
 
@@ -705,7 +843,69 @@ def write_summary_md(metrics: Dict, output_path: Path):
         count = pc['bucket_counts'].get(bucket, 0)
         md_content += f"| {bucket} | {count} |\n"
     md_content += "\n"
-    
+
+    # Signal Reason Analysis
+    sr = metrics['signal_reason']
+    if sr.get('has_signal_reason', False):
+        md_content += "## Signal Reason Analysis\n\n"
+        md_content += "This section shows why trades were triggered for strategies with signal reason tracking (e.g., StrictBreakout).\n\n"
+        if 'strategy_conditions' in sr:
+            md_content += f"**Strategy Conditions Used:** {', '.join(sr['strategy_conditions'])}\n\n"
+        md_content += f"Trades with Signal Reason: {sr['trades_with_reason']}\n"
+        md_content += f"Trades with Body Ratio Condition: {sr['trades_with_body_ratio']}\n"
+        md_content += f"Trades with Close Location Condition: {sr['trades_with_close_location']}\n"
+        md_content += f"Trades with Breakout Condition: {sr['trades_with_breakout']}\n\n"
+
+        if sr.get('body_ratio_reasons'):
+            md_content += "**Sample Body Ratio Reasons:**\n"
+            for reason in sr['body_ratio_reasons'][:5]:
+                md_content += f"- {reason}\n"
+            md_content += "\n"
+
+        if sr.get('close_location_reasons'):
+            md_content += "**Sample Close Location Reasons:**\n"
+            for reason in sr['close_location_reasons'][:5]:
+                md_content += f"- {reason}\n"
+            md_content += "\n"
+
+        if sr.get('breakout_reasons'):
+            md_content += "**Sample Breakout Reasons:**\n"
+            for reason in sr['breakout_reasons'][:5]:
+                md_content += f"- {reason}\n"
+            md_content += "\n"
+    md_content += "\n"
+
+    # Conditional Probability Analysis
+    cp = metrics['conditional_prob']
+    if cp:
+        md_content += "## Conditional Probability Analysis\n\n"
+        md_content += "This section shows how trade outcomes vary based on signal conditions.\n\n"
+
+        # Body Ratio
+        md_content += "### Body Ratio\n\n"
+        md_content += f"Threshold: {cp['body_ratio']['threshold']}\n\n"
+        md_content += "| Condition | Trades | Win Rate | Avg R |\n"
+        md_content += "|-----------|-------:|----------:|------:|\n"
+        md_content += f"| Body >= {cp['body_ratio']['threshold']} | {cp['body_ratio']['high']['trades']} | {cp['body_ratio']['high']['win_rate']:.2%} | {cp['body_ratio']['high']['avg_r']:.2f}R |\n"
+        md_content += f"| Body < {cp['body_ratio']['threshold']} | {cp['body_ratio']['low']['trades']} | {cp['body_ratio']['low']['win_rate']:.2%} | {cp['body_ratio']['low']['avg_r']:.2f}R |\n\n"
+
+        # Close Location
+        md_content += "### Close Location\n\n"
+        md_content += f"Threshold: {cp['close_location']['threshold']}\n\n"
+        md_content += "| Condition | Trades | Win Rate | Avg R |\n"
+        md_content += "|-----------|-------:|----------:|------:|\n"
+        md_content += f"| Close Location >= {cp['close_location']['threshold']} | {cp['close_location']['high']['trades']} | {cp['close_location']['high']['win_rate']:.2%} | {cp['close_location']['high']['avg_r']:.2f}R |\n"
+        md_content += f"| Close Location < {cp['close_location']['threshold']} | {cp['close_location']['low']['trades']} | {cp['close_location']['low']['win_rate']:.2%} | {cp['close_location']['low']['avg_r']:.2f}R |\n\n"
+
+        # Breakout
+        md_content += "### Breakout Percentage\n\n"
+        md_content += f"Threshold: {cp['breakout_pct']['threshold']}%\n\n"
+        md_content += "| Condition | Trades | Win Rate | Avg R |\n"
+        md_content += "|-----------|-------:|----------:|------:|\n"
+        md_content += f"| Breakout >= {cp['breakout_pct']['threshold']}% | {cp['breakout_pct']['high']['trades']} | {cp['breakout_pct']['high']['win_rate']:.2%} | {cp['breakout_pct']['high']['avg_r']:.2f}R |\n"
+        md_content += f"| Breakout < {cp['breakout_pct']['threshold']}% | {cp['breakout_pct']['low']['trades']} | {cp['breakout_pct']['low']['win_rate']:.2%} | {cp['breakout_pct']['low']['avg_r']:.2f}R |\n\n"
+    md_content += "\n"
+
     with open(output_path / 'summary.md', 'w') as f:
         f.write(md_content)
 

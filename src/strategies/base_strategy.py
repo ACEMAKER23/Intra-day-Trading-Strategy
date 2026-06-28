@@ -22,6 +22,11 @@ class Signal:
     orb_low: float
     orb_width: float
     orb_width_pct: float
+    reason: Optional[str] = None  # Reason for signal generation
+    open: Optional[float] = None  # OHLC data for signal candle
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
 
 
 class BaseStrategy(ABC):

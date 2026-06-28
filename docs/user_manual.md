@@ -19,7 +19,7 @@ Edit `src/strategy.py` to select your strategy:
 
 ```python
 # Strategy selection: choose which strategy to use
-# Available strategies: "ORB" (Opening Range Breakout)
+# Available strategies: "ORB" (Opening Range Breakout), "StrictBreakout"
 STRATEGY_TYPE = "ORB"
 
 # Strategy configuration parameters (passed to selected strategy)
@@ -28,6 +28,34 @@ STRATEGY_CONFIG = {
     'allow_longs': True,
     'allow_shorts': True,
     'signal_cutoff_hour': 12
+}
+```
+
+**Available Strategies:**
+
+**ORB (Opening Range Breakout):**
+- Basic breakout strategy with minimal constraints
+- Triggers when price breaks OR high/low
+- Configuration: `orb_minutes`, `allow_longs`, `allow_shorts`, `signal_cutoff_hour`
+
+**StrictBreakout:**
+- Enhanced breakout strategy with quality filters
+- Requires candle body size >= 0.6 (abs(close-open)/(high-low))
+- Requires close location in top/bottom 20% of candle
+- Requires breakout threshold of 0.05% beyond OR level
+- Configuration: `orb_minutes`, `allow_longs`, `allow_shorts`, `signal_cutoff_hour`, `min_body_ratio`, `min_close_location`, `breakout_threshold`
+
+**StrictBreakout Example Configuration:**
+```python
+STRATEGY_TYPE = "StrictBreakout"
+STRATEGY_CONFIG = {
+    'orb_minutes': 15,
+    'allow_longs': True,
+    'allow_shorts': True,
+    'signal_cutoff_hour': 12,
+    'min_body_ratio': 0.6,
+    'min_close_location': 0.8,
+    'breakout_threshold': 0.05
 }
 ```
 

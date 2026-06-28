@@ -19,7 +19,7 @@ from typing import List, Optional
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from strategies import ORBStrategy
+from strategies import ORBStrategy, StrictBreakoutStrategy
 
 # ==========================================
 # CONFIGURATION
@@ -28,19 +28,23 @@ from strategies import ORBStrategy
 # Strategy name for folder organization
 # Used to organize data and results by strategy variant
 # Example: "orb_15min", "orb_20min", "orb_long_only"
-STRATEGY_NAME = "default"
+STRATEGY_NAME = "StrictBreakout"
 
 # Strategy selection: choose which strategy to use
-# Available strategies: "ORB" (Opening Range Breakout)
-STRATEGY_TYPE = "ORB"
+# Available strategies: "ORB" (Opening Range Breakout), "StrictBreakout"
+STRATEGY_TYPE = "StrictBreakout"
 
 # Strategy configuration parameters (passed to selected strategy)
 STRATEGY_CONFIG = {
     'orb_minutes': 15,
     'allow_longs': True,
     'allow_shorts': True,
-    'signal_cutoff_hour': 12
-}
+    'signal_cutoff_hour': 12,
+    'min_body_ratio': 0.9,  # Increased from 0.6 for stricter filter
+    'min_close_location': 0.6,  # Increased from 0.8 for stricter filter
+    'breakout_threshold': 0.5,  # Increased from 0.05 to 0.5% for meaningful breakout
+    'use_conditions': ['close_location']  # Select which conditions to use: 'body_ratio', 'close_location', 'breakout'
+}#'breakout,'body_ratio', 'close_location', 
 
 # Path to the parquet file containing QQQ 1-minute OHLCV data
 # This file should have columns: open, high, low, close, volume
@@ -89,7 +93,7 @@ EXPORT_TRADES = True
 # File path for CSV export of trade log
 # Contains columns: entry_time, exit_time, direction, entry_price, exit_price, pnl, pnl_pct, exit_reason
 # Only created if EXPORT_TRADES is True
-TRADES_OUTPUT = Path(f"../data/processed/{STRATEGY_NAME}/trades.csv")
+TRADES_OUTPUT = Path(f"data/processed/{STRATEGY_NAME}/trades.csv")
 
 # Percentage of equity to risk per trade (as decimal)
 # Position size is calculated to ensure maximum loss = equity * RISK_PER_EQUITY
@@ -118,6 +122,13 @@ class Trade:
     profit_R: float  # Profit in R multiples (pnl / risk_per_share)
     orb_width: float  # ORB width in absolute price terms
     orb_width_pct: float  # ORB width as percentage of entry price
+    signal_reason: Optional[str] = None  # Reason why signal was generated
+    open: Optional[float] = None  # OHLC data for signal candle
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    orb_high: Optional[float] = None
+    orb_low: Optional[float] = None
 
 # ==========================================
 # LOAD DATA
@@ -306,6 +317,13 @@ def execute_trade(session_df: pd.DataFrame, signal: dict, current_equity: float)
     direction = signal['direction']
     orb_high = signal['orb_high']
     orb_low = signal['orb_low']
+    signal_reason = signal.get('reason', None)
+    signal_open = signal.get('open', None)
+    signal_high = signal.get('high', None)
+    signal_low = signal.get('low', None)
+    signal_close = signal.get('close', None)
+    signal_orb_high = orb_high
+    signal_orb_low = orb_low
 
     # Entry at next bar open
     signal_idx = session_df.index.get_loc(signal_time)
@@ -426,7 +444,14 @@ def execute_trade(session_df: pd.DataFrame, signal: dict, current_equity: float)
         mae=mae,
         profit_R=profit_R,
         orb_width=orb_width,
-        orb_width_pct=orb_width_pct
+        orb_width_pct=orb_width_pct,
+        signal_reason=signal_reason,
+        open=signal_open,
+        high=signal_high,
+        low=signal_low,
+        close=signal_close,
+        orb_high=signal_orb_high,
+        orb_low=signal_orb_low
     )
 
     return trade
@@ -745,7 +770,14 @@ def export_trades(trades: List[Trade], path: Path):
             'mae': t.mae,
             'profit_R': t.profit_R,
             'orb_width': t.orb_width,
-            'orb_width_pct': t.orb_width_pct
+            'orb_width_pct': t.orb_width_pct,
+            'signal_reason': t.signal_reason,
+            'open': t.open,
+            'high': t.high,
+            'low': t.low,
+            'close': t.close,
+            'orb_high': t.orb_high,
+            'orb_low': t.orb_low
         })
 
     df = pd.DataFrame(trades_dict)
@@ -804,6 +836,12 @@ def main():
             print("ERROR: Invalid strategy configuration")
             return
         print(f"Strategy config: {strategy.get_config()}")
+    elif STRATEGY_TYPE == "StrictBreakout":
+        strategy = StrictBreakoutStrategy(STRATEGY_CONFIG)
+        if not strategy.validate_config():
+            print("ERROR: Invalid strategy configuration")
+            return
+        print(f"Strategy config: {strategy.get_config()}")
     else:
         print(f"ERROR: Unknown strategy type '{STRATEGY_TYPE}'")
         return
@@ -846,7 +884,12 @@ def main():
             'signal_time': signal.timestamp,
             'signal_price': signal.entry_price,
             'orb_high': signal.orb_high,
-            'orb_low': signal.orb_low
+            'orb_low': signal.orb_low,
+            'reason': signal.reason,
+            'open': signal.open,
+            'high': signal.high,
+            'low': signal.low,
+            'close': signal.close
         }
 
         # Execute trade with current equity for position sizing
@@ -922,7 +965,7 @@ def main():
 
     # Plot results
     print("Generating plots...")
-    plot_results(portfolio, trades, Path(f"../results/{STRATEGY_NAME}/backtest_results.png"))
+    plot_results(portfolio, trades, Path(f"results/{STRATEGY_NAME}/backtest_results.png"))
     print()
 
     # Export trades
